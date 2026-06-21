@@ -1,0 +1,63 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Verify asset catalog is included
+        run: |
+          if grep -q "Assets.xcassets" DispatchApp.xcodeproj/project.pbxproj; then
+            echo "OK: Assets.xcassets is referenced in the generated project"
+          else
+            echo "ERROR: Assets.xcassets is NOT referenced in the generated project"
+            exit 1
+          fi
+
+      - name: Build (unsigned)
+        run: |
+          xcodebuild \
+            -project DispatchApp.xcodeproj \
+            -scheme DispatchApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
+
+      - name: Verify app icon was compiled
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/DispatchApp.app"
+          if [ -f "$APP_PATH/Assets.car" ]; then
+            echo "OK: Assets.car was generated ($(du -h "$APP_PATH/Assets.car" | cut -f1))"
+          else
+            echo "ERROR: Assets.car was NOT generated - app icon will be missing"
+            exit 1
+          fi
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -r "build/Build/Products/Release-iphoneos/DispatchApp.app" Payload/
+          zip -r DispatchApp.ipa Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DispatchApp-ipa
+          path: DispatchApp.ipa
+          retention-days: 30

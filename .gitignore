@@ -1,0 +1,11 @@
+# XcodeGenが生成するため、コミットしない
+DispatchApp.xcodeproj/
+
+# ビルド成果物
+build/
+Payload/
+*.ipa
+DerivedData/
+
+# macOS
+.DS_Store
