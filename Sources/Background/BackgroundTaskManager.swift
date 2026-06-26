@@ -8,37 +8,83 @@ import BackgroundTasks
 /// iOSのBGTaskScheduler(BGAppRefreshTask)は「このタイミング以降のなるべく早い時間に」
 /// 実行してほしいとOSにリクエストする仕組みであり、正確な間隔を保証しない
 /// (バッテリー残量・利用習慣などをもとにOSが実行タイミングを決定する)。
-/// そのため、手動更新(プルダウン)と組み合わせて使うことを推奨する。
+///
+/// 【対策】
+/// - BGAppRefreshTask: 従来通り。OSが許可したタイミングで軽量チェックを行う。
+/// - BGProcessingTask: 充電中かつWi-Fi接続時に実行される、より確実なタスク。
+///   BGAppRefreshTask が遅延してもこちらが補完する。
+/// - scenePhase (.active): アプリをフォアグラウンドに持ってきた瞬間にチェック。
+///   これにより「開いたら必ず最新情報」が保証される。
 enum BackgroundTaskManager {
 
-    static let taskIdentifier = "com.dispatch.app.refresh"
+    static let refreshTaskIdentifier    = "com.dispatch.app.refresh"
+    static let processingTaskIdentifier = "com.dispatch.app.processing"
+
+    // MARK: - 登録
 
     /// アプリ起動時に1度だけ呼ぶ(タスクの登録)
     static func register() {
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { task in
+        // BGAppRefreshTask
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: refreshTaskIdentifier, using: nil) { task in
             guard let refreshTask = task as? BGAppRefreshTask else { return }
             handleAppRefresh(task: refreshTask)
         }
+
+        // BGProcessingTask
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: processingTaskIdentifier, using: nil) { task in
+            guard let processingTask = task as? BGProcessingTask else { return }
+            handleProcessing(task: processingTask)
+        }
     }
 
-    /// 次回のバックグラウンドチェックを予約する
+    // MARK: - スケジュール
+
+    /// 次回のバックグラウンドチェックを予約する(両タスクをまとめて登録)
     static func schedule() {
+        scheduleAppRefresh()
+        scheduleProcessing()
+    }
+
+    /// BGAppRefreshTask を予約する
+    private static func scheduleAppRefresh() {
         let prefs = AppPreferences.shared
         let intervalMinutes = min(max(prefs.checkIntervalMinutes, 15), 1440)
 
-        let request = BGAppRefreshTaskRequest(identifier: taskIdentifier)
+        let request = BGAppRefreshTaskRequest(identifier: refreshTaskIdentifier)
         request.earliestBeginDate = Date(timeIntervalSinceNow: TimeInterval(intervalMinutes * 60))
 
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
-            print("バックグラウンドタスクの予約に失敗しました: \(error)")
+            print("BGAppRefreshTask の予約に失敗しました: \(error)")
+        }
+    }
+
+    /// BGProcessingTask を予約する(充電中かつWi-Fi時に実行される補完タスク)
+    private static func scheduleProcessing() {
+        let request = BGProcessingTaskRequest(identifier: processingTaskIdentifier)
+        // 充電中かつWi-Fi接続時に実行してもらう
+        request.requiresNetworkConnectivity = true
+        request.requiresExternalPower = false  // 充電必須にしすぎると動かないため外す
+        // 最短でも設定間隔が経過してから実行する
+        let prefs = AppPreferences.shared
+        let intervalMinutes = min(max(prefs.checkIntervalMinutes, 15), 1440)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: TimeInterval(intervalMinutes * 60))
+
+        do {
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
+            // 既に登録済みの場合などエラーになることがあるが無視してよい
+            print("BGProcessingTask の予約に失敗しました: \(error)")
         }
     }
 
     static func cancel() {
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskIdentifier)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: refreshTaskIdentifier)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: processingTaskIdentifier)
     }
+
+    // MARK: - ハンドラ
 
     private static func handleAppRefresh(task: BGAppRefreshTask) {
         // 次回分を先に予約しておく(iOSの作法)
@@ -54,7 +100,23 @@ enum BackgroundTaskManager {
         }
     }
 
-    /// 手動更新(プルダウン)・バックグラウンド更新の両方から呼ばれる共通チェック処理
+    private static func handleProcessing(task: BGProcessingTask) {
+        // 次回分を先に予約しておく
+        schedule()
+
+        let work = Task {
+            await checkAllSchedules()
+            task.setTaskCompleted(success: true)
+        }
+
+        task.expirationHandler = {
+            work.cancel()
+        }
+    }
+
+    // MARK: - チェック処理
+
+    /// 手動更新(プルダウン)・バックグラウンド更新・フォアグラウンド復帰の全ケースから呼ばれる共通チェック処理
     @MainActor
     static func checkAllSchedules() async {
         let prefs = AppPreferences.shared

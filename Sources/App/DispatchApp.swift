@@ -4,6 +4,7 @@ import SwiftUI
 struct DispatchAppApp: App {
     @StateObject private var prefs = AppPreferences.shared
     @StateObject private var store = ScheduleStore.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         // バックグラウンドタスクの登録は、アプリ起動のなるべく早い段階で行う必要がある
@@ -18,8 +19,20 @@ struct DispatchAppApp: App {
                 .onAppear {
                     if prefs.isLoggedIn {
                         BackgroundTaskManager.schedule()
+                        // アプリ初回表示時にもチェックを実行する
+                        Task {
+                            await BackgroundTaskManager.checkAllSchedules()
+                        }
                     }
                 }
+        }
+        // バックグラウンドから復帰するたびにチェックを実行する
+        .onChange(of: scenePhase) { phase in
+            if phase == .active && prefs.isLoggedIn {
+                Task {
+                    await BackgroundTaskManager.checkAllSchedules()
+                }
+            }
         }
     }
 }
